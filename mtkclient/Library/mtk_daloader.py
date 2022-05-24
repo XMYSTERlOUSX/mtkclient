@@ -5,7 +5,8 @@ import json
 import logging
 import os
 import hashlib
-from mtkclient.Library.utils import LogBase, logsetup
+from binascii import hexlify
+from mtkclient.Library.utils import LogBase, logsetup, progress
 from mtkclient.Library.error import ErrorHandler
 from mtkclient.Library.daconfig import DAconfig
 from mtkclient.Library.mtk_dalegacy import DALegacy, norinfo, emmcinfo, sdcinfo, nandinfo64
@@ -32,6 +33,7 @@ class DAloader(metaclass=LogBase):
         self.daconfig = DAconfig(mtk=self.mtk, loader=self.mtk.config.loader,
                                  preloader=self.mtk.config.preloader, loglevel=loglevel)
         self.hwparam = hwparam(mtk.config.meid)
+        self.progress = progress(self.daconfig.pagesize, self.mtk.config.guiprogress)
         self.xft = None
         self.lft = None
         self.da = None
@@ -41,6 +43,10 @@ class DAloader(metaclass=LogBase):
         config = {}
         config["xflash"] = self.mtk.config.chipconfig.damode==damodes.XFLASH
         config["hwcode"] = self.config.hwcode
+        if self.config.meid is not None:
+            config["meid"] = hexlify(self.config.meid).decode('utf-8')
+        if self.config.socid is not None:
+            config["socid"] = hexlify(self.config.socid).decode('utf-8')
         config["flashtype"] = self.daconfig.flashtype
         config["flashsize"] = self.daconfig.flashsize
         if not self.mtk.config.chipconfig.damode==damodes.XFLASH:
@@ -91,6 +97,10 @@ class DAloader(metaclass=LogBase):
         if os.path.exists(".state"):
             config = json.loads(open(".state", "r").read())
             self.config.hwcode = config["hwcode"]
+            if "meid" in config:
+                self.config.meid = bytes.fromhex(config["meid"])
+            if "socid" in config:
+                self.config.socid = bytes.fromhex(config["socid"])
             self.xflash = config["xflash"]
             self.config.init_hwcode(self.config.hwcode)
             if self.xflash:
@@ -201,6 +211,13 @@ class DAloader(metaclass=LogBase):
     def readflash(self, addr, length, filename, parttype, display=True):
         return self.da.readflash(addr=addr, length=length, filename=filename, parttype=parttype, display=display)
 
+    def get_packet_length(self):
+        if self.xflash:
+            pt=self.da.get_packet_length()
+            return pt.read_packet_length
+        else:
+            return 512
+
     def peek(self, addr: int, length:int):
         if self.xflash:
             return self.xft.custom_read(addr=addr, length=length)
@@ -218,6 +235,9 @@ class DAloader(metaclass=LogBase):
             return self.xft.generate_keys()
         else:
             return self.lft.generate_keys()
+
+    def is_patched(self):
+        return self.da.patch
 
     def seccfg(self, lockflag):
         if self.xflash:

@@ -9,6 +9,15 @@ from struct import unpack, pack
 from binascii import hexlify
 from mtkclient.Library.utils import LogBase, logsetup
 from mtkclient.Library.error import ErrorHandler
+import time
+
+USBDL_BIT_EN = 0x00000001  # 1: download bit enabled
+USBDL_BROM = 0x00000002  # 0: usbdl by brom; 1: usbdl by bootloader
+USBDL_TIMEOUT_MASK = 0x0000FFFC  # 14-bit timeout: 0x0000~0x3FFE: second; 0x3FFFF: no timeout
+USBDL_TIMEOUT_MAX = (USBDL_TIMEOUT_MASK >> 2)  # maximum timeout indicates no timeout
+USBDL_MAGIC = 0x444C0000  # Brom will check this magic number
+MISC_LOCK_KEY_MAGIC = 0xAD98
+
 
 def calc_xflash_checksum(data):
     checksum = 0
@@ -109,9 +118,9 @@ class Preloader(metaclass=LogBase):
     def __init__(self, mtk, loglevel=logging.INFO):
         self.mtk = mtk
         self.__logger = logsetup(self, self.__logger, loglevel, mtk.config.gui)
-        #self.info = self.__logger.info
-        #self.debug = self.__logger.debug
-        #self.error = self.__logger.error
+        # self.info = self.__logger.info
+        # self.debug = self.__logger.debug
+        # self.error = self.__logger.error
         self.eh = ErrorHandler()
         self.gcpu = None
         self.config = mtk.config
@@ -128,15 +137,18 @@ class Preloader(metaclass=LogBase):
         if os.path.exists(".state"):
             try:
                 os.remove(".state")
+                os.remove(os.path.join("logs", "hwparam.json"))
             except:
                 pass
-        readsocid=self.config.readsocid
+        readsocid = self.config.readsocid
         skipwdt = self.config.skipwdt
 
         if not display:
             self.info("Status: Waiting for PreLoader VCOM, please reconnect mobile to brom mode")
+            self.config.set_gui_status(self.config.tr("Status: Waiting for connection"))
         else:
             self.info("Status: Waiting for PreLoader VCOM, please connect mobile")
+            self.config.set_gui_status(self.config.tr("Status: Waiting for connection"))
         res = False
         tries = 0
         while not res and tries < 10:
@@ -144,6 +156,7 @@ class Preloader(metaclass=LogBase):
             if not res:
                 if display:
                     self.error("Status: Handshake failed, retrying...")
+                    self.config.set_gui_status(self.config.tr("Status: Handshake failed, retrying..."))
                 self.mtk.port.close()
                 tries += 1
         if tries == 10:
@@ -152,6 +165,7 @@ class Preloader(metaclass=LogBase):
         if not self.echo(self.Cmd.GET_HW_CODE.value):  # 0xFD
             if not self.echo(self.Cmd.GET_HW_CODE.value):
                 self.error("Sync error. Please power off the device and retry.")
+                self.config.set_gui_status(self.config.tr("Sync error. Please power off the device and retry."))
             return False
         else:
             val = self.rdword()
@@ -194,7 +208,7 @@ class Preloader(metaclass=LogBase):
             self.info("\tHW subcode:\t\t" + hex(self.config.hwsubcode))
             self.info("\tHW Ver:\t\t\t" + hex(self.config.hwver))
             self.info("\tSW Ver:\t\t\t" + hex(self.config.swver))
-        meid=self.get_meid()
+        meid = self.get_meid()
         if meid is not None:
             self.config.set_meid(meid)
             if self.display:
@@ -223,30 +237,39 @@ class Preloader(metaclass=LogBase):
                     self.error(self.eh.status(status))
         return result
 
-    def write32(self, addr, dwords) -> bool:
-        if isinstance(dwords, int):
-            dwords = [dwords]
-        if self.echo(self.Cmd.WRITE32.value):
+    def write(self, addr, values, length=32) -> bool:
+        cmd = self.Cmd.WRITE16 if length == 16 else self.Cmd.WRITE32
+        packfmt = ">H" if length == 16 else ">I"
+
+        if isinstance(values, int):
+            values = [values]
+        if self.echo(cmd.value):
             if self.echo(pack(">I", addr)):
-                ack = self.echo(pack(">I", len(dwords)))
+                ack = self.echo(pack(">I", len(values)))
                 status = self.rword()
                 if status > 0xFF:
-                    self.error(f"Error on da_write32, addr {hex(addr)}, {self.eh.status(status)}")
+                    self.error(f"Error on da_write{length}, addr {hex(addr)}, {self.eh.status(status)}")
                     return False
                 if ack and status <= 3:
-                    for dword in dwords:
-                        if not self.echo(pack(">I", dword)):
+                    for val in values:
+                        if not self.echo(pack(packfmt, val)):
                             break
                     status2 = self.rword()
                     if status2 <= 0xFF:
                         return True
                     else:
-                        self.error(f"Error on da_write32, addr {hex(addr)}, {self.eh.status(status2)}")
+                        self.error(f"Error on da_write{length}, addr {hex(addr)}, {self.eh.status(status2)}")
             else:
-                self.error(f"Error on da_write32, addr {hex(addr)}, write address")
+                self.error(f"Error on da_write{length}, addr {hex(addr)}, write address")
         else:
-            self.error(f"Error on da_write32, addr {hex(addr)}, send cmd")
+            self.error(f"Error on da_write{length}, addr {hex(addr)}, send cmd")
         return False
+
+    def write16(self, addr, words) -> bool:
+        return self.write(addr, words, 16)
+
+    def write32(self, addr, dwords) -> bool:
+        return self.write(addr, dwords, 32)
 
     def writemem(self, addr, data):
         for i in range(0, len(data), 4):
@@ -254,6 +277,33 @@ class Preloader(metaclass=LogBase):
             while len(value) < 4:
                 value += b"\x00"
             self.write32(addr + i, unpack("<I", value))
+
+    def reset_to_brom(self, en=True, timeout=0):
+        usbdlreg = 0
+
+        # if anything is wrong and caused wdt reset, enter bootrom download mode #
+        timeout = USBDL_TIMEOUT_MAX if timeout == 0 else timeout // 1000
+        timeout <<= 2
+        timeout &= USBDL_TIMEOUT_MASK  # usbdl timeout cannot exceed max value
+
+        usbdlreg |= timeout
+        if en:
+            usbdlreg |= USBDL_BIT_EN
+        else:
+            usbdlreg &= ~USBDL_BIT_EN
+
+        usbdlreg &= ~USBDL_BROM
+        # Add magic number for MT6582
+        usbdlreg |= USBDL_MAGIC     # | 0x444C0000
+
+        # set BOOT_MISC0 as watchdog resettable
+        RST_CON = self.config.chipconfig.misc_lock + 8
+        USBDL_FLAG = self.config.chipconfig.misc_lock - 0x20
+        self.write32(self.config.chipconfig.misc_lock, MISC_LOCK_KEY_MAGIC)
+        self.write32(RST_CON, 1)
+        self.write32(self.config.chipconfig.misc_lock, 0)
+        self.write32(USBDL_FLAG, usbdlreg)
+        return
 
     def run_ext_cmd(self, cmd: bytes = b"\xB1"):
         self.usbwrite(self.Cmd.CMD_C8.value)
@@ -308,21 +358,27 @@ class Preloader(metaclass=LogBase):
         SetReg_DisableWatchDogTimer; BRom_WriteCmd32(): Reg 0x10007000[1]={ Value 0x22000000 }.
         """
         addr, value = self.config.get_watchdog_addr()
-        res = self.write32(addr, [value])
+        res = None
+
+        if hwcode in [0x6575, 0x6577]:
+            """
+            SoCs which share the same watchdog IP as mt6577 must use 16-bit I/O.
+            For example: mt6575, mt8317 and mt8377 (their hwcodes are 0x6575).
+            """
+            res = self.write16(addr, value)
+        else:
+            res = self.write32(addr, value)
+            if res and hwcode == 0x6592:
+                """
+                mt6592 has an additional watchdog register at 0x10000500.
+                TODO: verify if writing to this register is actually needed.
+                """
+                res = self.write32(0x10000500, 0x22000000)
         if not res:
             self.error("Received wrong SetReg_DisableWatchDogTimer response")
             return False
-        if hwcode == 0x6592:
-            res = self.write32(0x10000500, [0x22000000])
-            if res:
-                return True
-        elif hwcode in [0x6575, 0x6577]:
-            res = self.write32(0x2200, [0xC0000000])
-            if res:
-                return True
         else:
             return True
-        return False
 
     def get_bromver(self):
         if self.usbwrite(self.Cmd.GET_VERSION.value):
@@ -376,6 +432,7 @@ class Preloader(metaclass=LogBase):
 
     def jump_da(self, addr):
         self.info(f"Jumping to {hex(addr)}")
+        self.config.set_gui_status(self.config.tr(f"Jumping to {hex(addr)}"))
         if self.echo(self.Cmd.JUMP_DA.value):
             self.usbwrite(pack(">I", addr))
             data = b""
@@ -383,18 +440,22 @@ class Preloader(metaclass=LogBase):
                 resaddr = self.rdword()
             except Exception as e:
                 self.error(f"Jump_DA Resp2 {str(e)} ," + hexlify(data).decode('utf-8'))
+                self.config.set_gui_status(self.config.tr("DA Error"))
                 return False
             if resaddr == addr:
                 try:
                     status = self.rword()
                 except Exception as e:
                     self.error(f"Jump_DA Resp2 {str(e)} ," + hexlify(data).decode('utf-8'))
+                    self.config.set_gui_status(self.config.tr("DA Error"))
                     return False
                 if status == 0:
                     self.info(f"Jumping to {hex(addr)}: ok.")
+                    self.config.set_gui_status(self.config.tr(f"Jumping to {hex(addr)}: ok."))
                     return True
                 else:
                     self.error(f"Jump_DA status error:{self.eh.status(status)}")
+                    self.config.set_gui_status(self.config.tr("DA Error"))
 
         return False
 
@@ -465,7 +526,7 @@ class Preloader(metaclass=LogBase):
         return False
 
     def get_brom_log(self):
-        if self.echo(self.Cmd.BROM_DEBUGLOG.value): # 0xDD
+        if self.echo(self.Cmd.BROM_DEBUGLOG.value):  # 0xDD
             length = self.rdword()
             logdata = self.rbyte(length)
             return logdata
@@ -474,7 +535,7 @@ class Preloader(metaclass=LogBase):
         return b""
 
     def get_brom_log_new(self):
-        if self.echo(self.Cmd.GET_BROM_LOG_NEW.value): # 0xDF
+        if self.echo(self.Cmd.GET_BROM_LOG_NEW.value):  # 0xDF
             length = self.rdword()
             logdata = self.rbyte(length)
             status = self.rword()
@@ -493,36 +554,36 @@ class Preloader(metaclass=LogBase):
             mode = 0
         else:
             mode = 1
-        self.mtk.port.echo(self.Cmd.brom_register_access.value)
-        self.mtk.port.echo(pack(">I", mode))
-        self.mtk.port.echo(pack(">I", address))
-        self.mtk.port.echo(pack(">I", length))
-        status = self.mtk.port.usbread(2)
-        try:
-            status = unpack("<H", status)[0]
-        except:
-            pass
-
-        if status != 0:
-            if isinstance(status, int):
-                raise RuntimeError(self.eh.status(status))
-            else:
-                raise RuntimeError("Kamakiri2 failed :(")
-
-        if mode == 0:
-            data = self.mtk.port.usbread(length)
-        else:
-            self.mtk.port.usbwrite(data[:length])
-
-        if check_status:
+        if self.mtk.port.echo(self.Cmd.brom_register_access.value):
+            self.mtk.port.echo(pack(">I", mode))
+            self.mtk.port.echo(pack(">I", address))
+            self.mtk.port.echo(pack(">I", length))
             status = self.mtk.port.usbread(2)
             try:
                 status = unpack("<H", status)[0]
             except:
                 pass
+
             if status != 0:
-                raise RuntimeError(self.eh.status(status))
-        return data
+                if isinstance(status, int):
+                    raise RuntimeError(self.eh.status(status))
+                else:
+                    raise RuntimeError("Kamakiri2 failed :(")
+
+            if mode == 0:
+                data = self.mtk.port.usbread(length)
+            else:
+                self.mtk.port.usbwrite(data[:length])
+
+            if check_status:
+                status = self.mtk.port.usbread(2)
+                try:
+                    status = unpack("<H", status)[0]
+                except:
+                    pass
+                if status != 0:
+                    raise RuntimeError(self.eh.status(status))
+            return data
 
     def get_plcap(self):
         res = self.sendcmd(self.Cmd.GET_PL_CAP.value, 8)  # 0xFB
@@ -530,7 +591,7 @@ class Preloader(metaclass=LogBase):
         return self.mtk.config.plcap
 
     def get_hw_sw_ver(self):
-        res = self.sendcmd(self.Cmd.GET_HW_SW_VER.value, 8) # 0xFC
+        res = self.sendcmd(self.Cmd.GET_HW_SW_VER.value, 8)  # 0xFC
         return unpack(">HHHH", res)
 
     def get_meid(self):
@@ -543,13 +604,13 @@ class Preloader(metaclass=LogBase):
                     self.mtk.config.meid = self.usbread(length)
                     status = unpack("<H", self.usbread(2))[0]
                     if status == 0:
-                        self.config.is_brom=True
+                        self.config.is_brom = True
                         return self.mtk.config.meid
                     else:
                         self.error("Error on get_meid: " + self.eh.status(status))
             else:
                 self.config.is_brom = False
-        return b""
+        return None
 
     def get_socid(self):
         if self.usbwrite(self.Cmd.GET_BL_VER.value):
@@ -572,12 +633,13 @@ class Preloader(metaclass=LogBase):
         if len(data + sigdata) % 2 != 0:
             data += b"\x00"
         for x in range(0, len(data), 2):
-            gen_chksum ^= unpack("<H", data[x:x + 2])[0] #3CDC
-        if len(data)&1!=0:
+            gen_chksum ^= unpack("<H", data[x:x + 2])[0]  # 3CDC
+        if len(data) & 1 != 0:
             gen_chksum ^= data[-1:]
         return gen_chksum, data
 
     def upload_data(self, data, gen_chksum):
+        self.config.set_gui_status(self.config.tr(f"Uploading data."))
         bytestowrite = len(data)
         pos = 0
         while bytestowrite > 0:
@@ -593,7 +655,7 @@ class Preloader(metaclass=LogBase):
             if 0 <= status <= 0xFF:
                 return True
             else:
-                self.error(f"upload_data failed with error: "+self.eh.status(status))
+                self.error(f"upload_data failed with error: " + self.eh.status(status))
                 return False
         except Exception as e:
             self.error(f"upload_data resp error : " + str(e))
@@ -601,18 +663,23 @@ class Preloader(metaclass=LogBase):
         return True
 
     def send_da(self, address, size, sig_len, dadata):
+        self.config.set_gui_status(self.config.tr("Sending DA."))
         gen_chksum, data = self.prepare_data(dadata[:-sig_len], dadata[-sig_len:], size)
         if not self.echo(self.Cmd.SEND_DA.value):  # 0xD7
             self.error(f"Error on DA_Send cmd")
+            self.config.set_gui_status(self.config.tr("Error on DA_Send cmd"))
             return False
         if not self.echo(address):
             self.error(f"Error on DA_Send address")
+            self.config.set_gui_status(self.config.tr("Error on DA_Send address"))
             return False
         if not self.echo(len(data)):
             self.error(f"Error on DA_Send size")
+            self.config.set_gui_status(self.config.tr("Error on DA_Send size"))
             return False
         if not self.echo(sig_len):
             self.error(f"Error on DA_Send sig_len")
+            self.config.set_gui_status(self.config.tr("Error on DA_Send sig_len"))
             return False
 
         status = self.rword()
@@ -623,4 +690,5 @@ class Preloader(metaclass=LogBase):
             else:
                 return True
         self.error(f"DA_Send status error:{self.eh.status(status)}")
+        self.config.set_gui_status(self.config.tr("Error on DA_Send"))
         return False

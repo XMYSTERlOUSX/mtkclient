@@ -163,8 +163,10 @@ class Main(metaclass=LogBase):
             if mtk.port.cdc.pid == 0x0003:
                 plt = PLTools(mtk, self.__logger.level)
                 self.info("Uploading stage 1")
+                mtk.config.set_gui_status(mtk.config.tr("Uploading stage 1"))
                 if plt.runpayload(filename=stage1file):
                     self.info("Successfully uploaded stage 1, sending stage 2")
+                    mtk.config.set_gui_status(mtk.config.tr("Successfully uploaded stage 1, sending stage 2"))
                     with open(stage2file, "rb") as rr:
                         stage2data = rr.read()
                         while len(stage2data) % 0x200:
@@ -196,7 +198,7 @@ class Main(metaclass=LogBase):
                     if flag != 0xD0D0D0D0:
                         self.error(f"Error on sending stage2, size {hex(len(stage2data))}.")
                     self.info(f"Done sending stage2, size {hex(len(stage2data))}.")
-
+                    mtk.config.set_gui_status(mtk.config.tr("Done sending stage 2"))
                     if verifystage2:
                         self.info("Verifying stage2 data")
                         rdata = b""
@@ -218,6 +220,7 @@ class Main(metaclass=LogBase):
                                 wf.write(rdata)
                         else:
                             self.info("Stage2 verification passed.")
+                            mtk.config.set_gui_status(mtk.config.tr("Stage2 verification passed."))
 
                     # ####### Kick Watchdog
                     # magic
@@ -233,6 +236,7 @@ class Main(metaclass=LogBase):
                     # address
                     mtk.port.usbwrite(pack(">I", stage2addr))
                     self.info("Done jumping stage2 at %08X" % stage2addr)
+                    mtk.config.set_gui_status(mtk.config.tr("Done jumping stage2 at %08X" % stage2addr))
                     ack = unpack(">I", mtk.port.usbread(4))[0]
                     if ack == 0xB1B2B3B4:
                         self.info("Successfully loaded stage2")
@@ -255,7 +259,7 @@ class Main(metaclass=LogBase):
                             time.sleep(2)
                             config = Mtk_Config(loglevel=self.__logger.level, gui=mtk.config.gui,
                                                 guiprogress=mtk.config.guiprogress)
-                            mtk = Mtk(loglevel=self.__logger.level, config=config)
+                            mtk = Mtk(loglevel=self.__logger.level, config=config, serialportname=mtk.port.serialportname)
                             res = mtk.preloader.init()
                             if not res:
                                 self.error("Error on loading preloader")
@@ -271,7 +275,7 @@ class Main(metaclass=LogBase):
             dwords = length // 4
             if length % 4:
                 dwords += 1
-            if filename != None:
+            if filename is not None:
                 wf = open(filename, "wb")
             sdata = b""
             print_progress(0, 100, prefix='Progress:',
@@ -281,9 +285,12 @@ class Main(metaclass=LogBase):
             pos = 0
             while dwords:
                 size = min(512 // 4, dwords)
-                data = b"".join(int.to_bytes(val, 4, 'little') for val in mtk.preloader.read32(addr + pos, size))
+                if dwords == 1:
+                    data = pack("<I",mtk.preloader.read32(addr + pos, size))
+                else:
+                    data = b"".join(int.to_bytes(val, 4, 'little') for val in mtk.preloader.read32(addr + pos, size))
                 sdata += data
-                if filename != "":
+                if filename is not None:
                     wf.write(data)
                 pos += len(data)
                 prog = pos / length * 100
@@ -294,7 +301,7 @@ class Main(metaclass=LogBase):
                 dwords = (length - pos) // 4
             print_progress(100, 100, prefix='Progress:',
                            suffix='Finished', bar_length=50)
-            if filename == "":
+            if filename is None:
                 print(hexlify(sdata).decode('utf-8'))
             else:
                 wf.close()
@@ -315,7 +322,13 @@ class Main(metaclass=LogBase):
         config = Mtk_Config(loglevel=loglevel, gui=None, guiprogress=None)
         ArgHandler(self.args, config)
         self.eh = ErrorHandler()
-        mtk = Mtk(config=config, loglevel=loglevel)
+        serialport = None
+        try:
+            serialport = self.args.serialport
+        except:
+            pass
+        mtk = Mtk(config=config, loglevel=loglevel, serialportname=serialport)
+        config.set_peek(mtk.daloader.peek)
         if mtk.config.debugmode:
             logfilename = os.path.join("logs", "log.txt")
             if os.path.exists(logfilename):
@@ -348,7 +361,7 @@ class Main(metaclass=LogBase):
                 rmtk = mtk.crasher()
                 if rmtk is None:
                     sys.exit(0)
-                if rmtk.port.cdc.vid != 0xE8D and rmtk.port.cdc.pid != 0x0003:
+                if rmtk.port.cdc.vid != 0xE8D or rmtk.port.cdc.pid != 0x0003:
                     self.warning("We couldn't enter preloader.")
                 plt = PLTools(rmtk, self.__logger.level)
                 data, filename = plt.run_dump_preloader(self.args.ptype)
@@ -367,7 +380,7 @@ class Main(metaclass=LogBase):
             self.close()
         elif cmd == "brute":
             self.info("Kamakiri / DA Bruteforce run")
-            rmtk = Mtk(config=mtk.config, loglevel=self.__logger.level)
+            rmtk = Mtk(config=mtk.config, loglevel=self.__logger.level, serialportname=mtk.port.serialportname)
             plt = PLTools(rmtk, self.__logger.level)
             plt.runbrute(self.args)
             self.close()
@@ -388,7 +401,7 @@ class Main(metaclass=LogBase):
             if os.path.exists(plstage):
                 with open(plstage, "rb") as rf:
                     rf.seek(0)
-                    pldata = rf.read()
+                    pldata = mtk.patch_preloader_security(rf.read())
             if mtk.preloader.init():
                 if mtk.config.target_config["daa"]:
                     mtk = mtk.bypass_security()
@@ -406,14 +419,14 @@ class Main(metaclass=LogBase):
                 mtk.config.preloader = mtk.patch_preloader_security(dadata)
             if mtk.config.preloader_filename is not None:
                 self.info("Using custom preloader : " + mtk.config.preloader_filename)
-                daaddr, dadata = mtk.parse_preloader(mtk.config.preloader)
-                mtk.config.preloader = mtk.patch_preloader_security(dadata)
+                mtk.preloader.setreg_disablewatchdogtimer(mtk.config.hwcode)
+                daaddr, dadata = mtk.parse_preloader(mtk.config.preloader_filename)
+                dadata = mtk.config.preloader = mtk.patch_preloader_security(dadata)
                 if mtk.preloader.send_da(daaddr, len(dadata), 0x100, dadata):
                     self.info(f"Sent preloader to {hex(daaddr)}, length {hex(len(dadata))}")
                     if mtk.preloader.jump_da(daaddr):
                         self.info(f"PL Jumped to daaddr {hex(daaddr)}.")
-                        time.sleep(2)
-                        """
+                        time.sleep(1)
                         mtk = Mtk(config=mtk.config, loglevel=self.__logger.level)
                         res = mtk.preloader.init()
                         if not res:
@@ -425,19 +438,33 @@ class Main(metaclass=LogBase):
                         if self.args.startpartition is not None:
                             partition = self.args.startpartition
                             self.info("Booting to : " + partition)
-                            # if data[0:4]!=b"\x88\x16\x88\x58":
-                            #    data=0x200*b"\x00"+data
-                            mtk.preloader.send_partition_data(partition, pldata)
+                            mtk.preloader.send_partition_data(partition, mtk.patch_preloader_security(pldata))
                             status = mtk.preloader.jump_to_partition(partition)  # Do not remove !
-                            res = mtk.preloader.read32(0x10C180, 10)
-                            for val in res:
-                                print(hex(val))
+                        if self.args.offset is not None and self.args.length is not None:
+                            offset = getint(self.args.offset)
+                            length = getint(self.args.length)
+                            rlen = min(0x200, length)
+                            status=0
+                            mtk.preloader.get_hw_sw_ver()
+                            if self.args.filename is not None:
+                                with open(self.args.filename,"wb") as wf:
+                                    for pos in range(offset, offset+length,rlen):
+                                        print("Reading pos %08X" % pos)
+                                        res = mtk.preloader.read32(pos, rlen//4)
+                                        wf.write(b"".join([pack("<I",val) for val in res]))
+                            else:
+                                for pos in range(offset, offset+length,rlen):
+                                    print("Reading pos %08X" % pos)
+                                    res = mtk.preloader.read32(pos, rlen // 4)
+                                    print(hexlify(b"".join([pack("<I",val) for val in res])).decode('utf-8'))
+
+                            #for val in res:
+                            #    print(hex(val))
                             if status != 0x0:
                                 self.error("Error on jumping to partition: " + self.eh.status(status))
                             else:
                                 self.info("Jumping to partition ....")
                             return
-                        """
                         sys.exit(0)
             if mtk.preloader.send_da(plstageaddr, len(pldata), 0x100, pldata):
                 self.info(f"Sent stage2 to {hex(plstageaddr)}, length {hex(len(pldata))}")
@@ -508,7 +535,10 @@ class Main(metaclass=LogBase):
                 preloader = None
             da_handler = DA_handler(mtk, loglevel)
             mtk = da_handler.configure_da(mtk, preloader)
-            da_handler.handle_da_cmds(mtk, cmd, self.args)
+            if mtk is not None:
+                da_handler.handle_da_cmds(mtk, cmd, self.args)
+            else:
+                self.close()
 
 
     def cmd_log(self, mtk, filename):

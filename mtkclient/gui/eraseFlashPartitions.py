@@ -1,15 +1,19 @@
 import sys
 import mock
-from PySide6.QtCore import QObject
+
+from PySide6.QtCore import QObject, Signal
 from mtkclient.gui.toolkit import FDialog
 from mtkclient.gui.toolkit import trap_exc_during_debug, asyncThread
 
 sys.excepthook = trap_exc_during_debug
 
 class EraseFlashWindow(QObject):
-    def __init__(self, ui, parent, devhandler, da_handler, sendToLog):  # def __init__(self, *args, **kwargs):
+    enableButtonsSignal = Signal()
+    disableButtonsSignal = Signal()
+
+    def __init__(self, ui, parent, da_handler, sendToLog):  # def __init__(self, *args, **kwargs):
         super(EraseFlashWindow, self).__init__(parent)
-        self.mtkClass = devhandler.mtkClass
+        self.mtkClass = da_handler.mtk
         self.parent = parent
         self.sendToLog = sendToLog
         self.fdialog = FDialog(parent)
@@ -28,23 +32,33 @@ class EraseFlashWindow(QObject):
                 self.parent.erasepartitionCheckboxes[partition]['box'].setChecked(False)
 
     def erasePartition(self):
+        self.parent.Status["rpmb"] = False
         self.ui.erasepartitionsbtn.setEnabled(False)
         thread = asyncThread(parent=self.parent, n=0, function=self.erasePartitionAsync,parameters=[])
         thread.sendToLogSignal.connect(self.sendToLog)
+        thread.update_status_text.connect(self.parent.update_status_text)
         thread.sendUpdateSignal.connect(self.parent.updateState)
         thread.sendToProgressSignal.connect(self.parent.updateProgress)
         thread.start()
 
     def eraseFlash(self, parttype):
+        self.parent.Status["rpmb"] = False
         if parttype == "user":
             self.flashsize = self.mtkClass.daloader.daconfig.flashsize
         elif parttype == "rpmb":
-            self.flashsize = self.mtkClass.daloader.daconfig.rpmbsize
+            self.parent.Status["rpmb"] = True
+            if self.mtkClass.daloader.daconfig.flashtype == "ufs":
+                self.flashsize = self.mtkClass.daloader.daconfig.rpmbsize * 8
+            else:
+                self.flashsize = self.mtkClass.daloader.daconfig.rpmbsize
         elif parttype == "boot1":
             self.flashsize = self.mtkClass.daloader.daconfig.boot1size
         elif parttype == "boot2":
             self.flashsize = self.mtkClass.daloader.daconfig.boot2size
         self.parttype = parttype
+        self.parent.Status["totalsize"] = self.flashsize
+        self.parent.Status["currentPartitionSize"] = self.flashsize
+        self.parent.Status["currentPartition"] = parttype
         self.parent.disablebuttons()
         thread = asyncThread(parent=self, n=0, function=self.eraseFlashAsync, parameters=[parttype])
         thread.sendToLogSignal.connect(self.sendToLog)
@@ -57,8 +71,10 @@ class EraseFlashWindow(QObject):
         self.parent.Status["done"] = False
         thread = asyncThread(self.parent.parent(), 0, self.parent.updateStateAsync, [])
         thread.sendUpdateSignal.connect(self.parent.updateState)
+        thread.update_status_text.connect(self.parent.update_status_text)
         thread.sendToProgressSignal.connect(self.parent.updateProgress)
         thread.start()
+        self.disableButtonsSignal.emit()
         variables = mock.Mock()
         variables.parttype = None
         self.parent.Status["writeFile"] = variables.filename
@@ -77,6 +93,7 @@ class EraseFlashWindow(QObject):
             self.da_handler.handle_da_cmds(self.mtkClass, "ef", variables)
         self.parent.Status["done"] = True
         thread.wait()
+        self.enableButtonsSignal.emit()
 
     def eraseBoot2(self):
         self.eraseFlash("boot2")
@@ -100,8 +117,14 @@ class EraseFlashWindow(QObject):
         thread.sendUpdateSignal.connect(self.parent.updateState)
         thread.sendToProgressSignal.connect(self.parent.updateProgress)
         thread.start()
+        self.disableButtonsSignal.emit()
         # calculate total bytes
         self.parent.Status["allPartitions"] = {}
+        totalsize = 0
+        for partition in self.parent.erasepartitionCheckboxes:
+            if self.parent.erasepartitionCheckboxes[partition]['box'].isChecked():
+                totalsize += self.parent.erasepartitionCheckboxes[partition]['size']
+        self.parent.Status["totalsize"] = totalsize
         for partition in self.parent.erasepartitionCheckboxes:
             if self.parent.erasepartitionCheckboxes[partition]['box'].isChecked():
                 self.parent.Status["allPartitions"][partition] = {"size": self.parent.erasepartitionCheckboxes[partition]['size'],
@@ -119,3 +142,4 @@ class EraseFlashWindow(QObject):
                 # MtkTool.cmd_stage(mtkClass, None, None, None, False)
         self.parent.Status["done"] = True
         thread.wait()
+        self.enableButtonsSignal.emit()

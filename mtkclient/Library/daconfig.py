@@ -147,6 +147,7 @@ class DAconfig(metaclass=LogBase):
             if not os.path.exists(loader):
                 self.warning("Couldn't open " + loader)
             else:
+                self.info("Using custom loader: "+loader)
                 self.parse_da_loader(loader)
 
     def m_extract_emi(self, data):
@@ -156,26 +157,21 @@ class DAconfig(metaclass=LogBase):
             data = data[idx:]
             mlen = unpack("<I", data[0x20:0x20 + 4])[0]
             siglen = unpack("<I", data[0x2C:0x2C + 4])[0]
-            data = data[:mlen]
-
+            data = data[:mlen-siglen]
+            dramsize = unpack("<I",data[-4:])[0]
+            data = data[-dramsize-4:-4]
         bldrstring = b"MTK_BLOADER_INFO_v"
         len_bldrstring = len(bldrstring)
         idx = data.find(bldrstring)
         if idx == -1:
             return None
-        elif idx == 0:
+        elif idx == 0 and self.config.chipconfig.damode == damodes.XFLASH:
             ver = int(data[idx + len_bldrstring:idx + len_bldrstring + 2].rstrip(b"\x00"))
             return ver, data
-        ver = int(data[idx + len_bldrstring:idx + len_bldrstring + 2].rstrip(b"\x00"))
-        emi = data[idx:-siglen]
-        rlen = len(emi) - 4
-        if len(emi) > 4:
-            val = unpack("<I", emi[-4:])[0]
-            if val == rlen:
-                emi = emi[:rlen]
-                if not self.config.chipconfig.damode == damodes.XFLASH:
-                    if emi.find(b"MTK_BIN") != -1:
-                        emi = emi[emi.find(b"MTK_BIN") + 0xC:]
+        else:
+            if data.find(b"MTK_BIN") != -1:
+                emi = data[data.find(b"MTK_BIN") + 0xC:]
+                ver = int(data[idx + len_bldrstring:idx + len_bldrstring + 2].rstrip(b"\x00"))
                 return ver, emi
         return None
 
@@ -233,7 +229,7 @@ class DAconfig(metaclass=LogBase):
             for loader in loaders:
                 if loader.hw_version <= self.config.hwver:
                     if loader.sw_version <= self.config.swver:
-                        if self.loader is None:
+                        if self.da is None:
                             self.da = loader
                             self.loader = loader.loader
 

@@ -27,7 +27,88 @@ except ImportError:
     pass
 
 from struct import unpack, pack
+from io import BytesIO
 
+from io import BytesIO
+
+class mtktee:
+    magic = None
+    hdrlen = None
+    flag1 = None
+    flag2 = None
+    flag3 = None
+    flag4 = None
+    flag5 = None
+    datalen = None
+    datalen2 = None
+    keyseed = None
+    ivseed = None
+    data = None
+
+    def parse(self, data):
+        sh=structhelper_io(BytesIO(data))
+        self.magic = sh.qword()
+        self.hdrlen = sh.dword()
+        self.flag1 = sh.bytes()
+        self.flag2 = sh.bytes()
+        self.flag3 = sh.bytes()
+        self.flag4 = sh.bytes()
+        self.flag5 = sh.dword()
+        self.datalen = sh.dword()
+        self.datalen2 = sh.dword()
+        self.keyseed = bytearray(sh.bytes(16))
+        self.ivseed = bytearray(sh.bytes(16))
+        sh.seek(self.hdrlen)
+        self.data = bytearray(sh.bytes(self.datalen))
+
+class structhelper_io:
+    pos = 0
+
+    def __init__(self, data: BytesIO = None, direction='little'):
+        self.data = data
+        self.direction = direction
+
+    def setdata(self, data, offset=0):
+        self.pos = offset
+        self.data = data
+
+    def qword(self):
+        dat = int.from_bytes(self.data.read(8), self.direction)
+        return dat
+
+    def dword(self):
+        dat = int.from_bytes(self.data.read(4), self.direction)
+        return dat
+
+    def dwords(self, dwords=1):
+        dat = [int.from_bytes(self.data.read(4), self.direction) for _ in range(dwords)]
+        return dat
+
+    def short(self):
+        dat = int.from_bytes(self.data.read(2), self.direction)
+        return dat
+
+    def shorts(self, shorts):
+        dat = [int.from_bytes(self.data.read(2), self.direction) for _ in range(shorts)]
+        return dat
+
+    def bytes(self, rlen=1):
+        dat = self.data.read(rlen)
+        if dat == b'':
+            return dat
+        if rlen == 1:
+            return dat[0]
+        return dat
+
+    def string(self, rlen=1):
+        dat = self.data.read(rlen)
+        return dat
+
+    def getpos(self):
+        return self.data.tell()
+
+    def seek(self, pos):
+        self.data.seek(pos)
 
 def find_binary(data, strf, pos=0):
     t = strf.split(b".")
@@ -91,17 +172,17 @@ class progress:
         self.progpos = 0
 
     def show_progress(self, prefix, pos, total, display=True):
-        if pos != 0:
+        if pos != 0.0:
             prog = round(float(pos) / float(total) * float(100), 1)
         else:
-            prog = 0
-        if prog == 0:
-            self.prog = 0
+            prog = 0.0
+        if prog == 0.0:
+            self.prog = 0.0
             self.start = time.time()
             self.progtime = time.time()
             self.progpos = pos
             if self.guiprogress is not None:
-                self.guiprogress(pos)
+                self.guiprogress(pos // self.pagesize)
             print_progress(prog, 100, prefix='Done',
                            suffix=prefix + ' (Sector 0x%X of 0x%X) %0.2f MB/s' %
                                   (pos // self.pagesize,
@@ -110,7 +191,7 @@ class progress:
 
         if prog > self.prog:
             if self.guiprogress is not None:
-                self.guiprogress(pos)
+                self.guiprogress(pos // self.pagesize)
             if display:
                 t0 = time.time()
                 tdiff = t0 - self.progtime

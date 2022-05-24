@@ -1,5 +1,6 @@
 import math
 import os
+import sys
 import time
 import datetime as dt
 from PySide6.QtCore import Signal, QThread, Slot, Property
@@ -87,7 +88,7 @@ class CheckBox(QCheckBox):
     readOnly = Property(bool, isReadOnly, setReadOnly)
 
 def convert_size(size_bytes):
-    if size_bytes == 0:
+    if size_bytes <= 0:
         return "0B"
     size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
     i = int(math.floor(math.log(size_bytes, 1024)))
@@ -100,6 +101,7 @@ class asyncThread(QThread):
     sendToLogSignal = Signal(str)
     sendUpdateSignal = Signal()
     sendToProgressSignal = Signal(int)
+    update_status_text = Signal(str)
 
     def __init__(self, parent, n, function, parameters):
         super(asyncThread, self).__init__(parent)
@@ -122,11 +124,8 @@ class FDialog():
         fname = os.path.join(self.lastpath, filename)
         self.fdialog.setDirectory(self.lastpath)
         self.fdialog.selectFile(fname)
-        options = QFileDialog.Options()
-        options |= QFileDialog.DontUseNativeDialog
-        options |= QFileDialog.DontUseCustomDirectoryIcons
         ret = self.fdialog.getSaveFileName(self.parent, self.parent.tr("Select output file"), fname,
-                                          "Binary dump (*.bin)",options=options)
+                                          "Binary dump (*.bin)")
         if ret:
             fname = ret[0]
             if fname != "":
@@ -135,29 +134,29 @@ class FDialog():
         return None
 
     def open(self, filename=""):
-        options = QFileDialog.Options()
-        options |= QFileDialog.DontUseNativeDialog
-        options |= QFileDialog.DontUseCustomDirectoryIcons
         fname = os.path.join(self.lastpath, filename)
         self.fdialog.setDirectory(self.lastpath)
         self.fdialog.selectFile(fname)
         ret = self.fdialog.getOpenFileName(self.parent, self.parent.tr("Select input file"),
-                                   fname, "Binary dump (*.bin)",options=options)
+                                   fname, "Binary dump (*.bin)")
         if ret:
-            fname = ret[0]
-            if fname != "":
-                self.lastpath = os.path.dirname(fname)
-                return fname
+            if isinstance(ret, tuple):
+                fname = os.path.normpath(ret[0])  # fixes backslash problem on windows
+                if ret[0] != "":
+                    self.lastpath = os.path.dirname(fname)
+                    return fname
         return None
 
     def opendir(self,caption):
         options = QFileDialog.Options()
-        options |= QFileDialog.DontUseNativeDialog
-        options |= QFileDialog.DontUseCustomDirectoryIcons
+        if sys.platform.startswith('freebsd') or sys.platform.startswith('linux'):
+            options |= QFileDialog.DontUseNativeDialog
+            options |= QFileDialog.DontUseCustomDirectoryIcons
         fname = os.path.join(self.lastpath)
         self.fdialog.setDirectory(self.lastpath)
         fdir=self.fdialog.getExistingDirectory(self.parent, self.parent.tr(caption), fname, options=options)
-        if fdir != "":
+        fdir = os.path.normpath(fdir) #fixes backslash problem on windows
+        if fdir != "" and fdir != ".":
             self.lastpath = fdir
             return fdir
         return None

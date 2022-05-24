@@ -1,6 +1,7 @@
 import hmac
 import os
 from struct import unpack, pack
+
 from mtkclient.config.payloads import pathconfig
 from mtkclient.Library.error import ErrorHandler
 from mtkclient.Library.hwcrypto import crypto_setup, hwcrypto
@@ -8,7 +9,8 @@ from mtkclient.Library.utils import LogBase, progress, logsetup, find_binary
 from mtkclient.Library.seccfg import seccfg
 from binascii import hexlify
 import hashlib
-
+from mtkclient.Library.utils import mtktee
+import json
 
 class XCmd:
     CUSTOM_ACK = 0x0F0000
@@ -166,7 +168,19 @@ class xflashext(metaclass=LogBase):
                 return daextdata
         return None
 
+    def patch_da1(self, da1):
+        self.info("Patching da1 ...")
+        da1patched = bytearray(da1)
+        # Patch security
+        da_version_check = find_binary(da1, b"\x40\xB1\x01\x23\x4F\xF0")
+        if da_version_check is not None:
+            da1patched[da_version_check+0x2] = 0x0
+        else:
+            self.warning("Error on patching da1 version check...")
+        return da1patched
+
     def patch_da2(self, da2):
+        self.info("Patching da2 ...")
         # open("da2.bin","wb").write(da2)
         da2patched = bytearray(da2)
         # Patch security
@@ -227,7 +241,7 @@ class xflashext(metaclass=LogBase):
 
     def custom_read(self, addr, length):
         if self.cmd(XCmd.CUSTOM_READ):
-            self.xsend(addr)
+            self.xsend(data=addr, is64bit=True)
             self.xsend(length)
             data = self.xread()
             status = self.status()
@@ -246,7 +260,7 @@ class xflashext(metaclass=LogBase):
 
     def custom_write(self, addr, data):
         if self.cmd(XCmd.CUSTOM_WRITE):
-            self.xsend(addr)
+            self.xsend(data=addr, is64bit=True)
             self.xsend(len(data))
             self.xsend(data)
             status = self.status()
@@ -345,9 +359,9 @@ class xflashext(metaclass=LogBase):
     def custom_rpmb_init(self):
         hwc = self.cryptosetup()
         if self.config.chipconfig.meid_addr:
-            meid = self.custom_read(self.config.chipconfig.meid_addr, 16)
+            meid = self.custom_read(0x1008ec, 16)
             if meid != b"":
-                self.config.set_meid(meid)
+                #self.config.set_meid(meid)
                 self.info("Generating sej rpmbkey...")
                 self.setotp(hwc)
                 rpmbkey = hwc.aes_hwcrypt(mode="rpmb", data=meid, btype="sej")
@@ -517,42 +531,40 @@ class xflashext(metaclass=LogBase):
             return True, "Successfully wrote seccfg."
         return False, "Error on writing seccfg config to flash."
 
-    def decrypt_tee(self, filename="tee1.bin", offset=0xF864):
+    def decrypt_tee(self, filename="tee1.bin", aeskey1:bytes=None, aeskey2:bytes=None):
         hwc = self.cryptosetup()
-        rdata=hwc.mtee(filename=filename,offset=offset)
-        open("tee1.dec","wb").write(rdata)
+        with open(filename, "rb") as rf:
+            data=rf.read()
+            idx=0
+            while idx!=-1:
+                idx=data.find(b"EET KTM ",idx+1)
+                if idx!=-1:
+                    mt = mtktee()
+                    mt.parse(data[idx:])
+                    rdata=hwc.mtee(data=mt.data, keyseed=mt.keyseed, ivseed=mt.ivseed,
+                                   aeskey1=aeskey1, aeskey2=aeskey2)
+                    open("tee_"+hex(idx)+".dec","wb").write(rdata)
 
     def generate_keys(self):
         hwc = self.cryptosetup()
         meid = self.config.get_meid()
         socid = self.config.get_socid()
+        hwcode = self.config.get_hwcode()
         retval = {}
         if meid is not None:
             self.info("MEID        : " + hexlify(meid).decode('utf-8'))
-        else:
-            try:
-                if self.config.chipconfig.meid_addr is not None:
-                    meid = b"".join([pack("<I", val) for val in self.readmem(self.config.chipconfig.meid_addr, 4)])
-                    self.config.set_meid(meid)
-                    self.info("MEID        : " + hexlify(meid).decode('utf-8'))
-                    retval["meid"]=hexlify(meid).decode('utf-8')
-            except Exception as err:
-                pass
+            retval["meid"] = hexlify(meid).decode('utf-8')
+            self.config.hwparam.writesetting("meid", hexlify(meid).decode('utf-8'))
         if socid is not None:
-            self.info("SOCID        : " + hexlify(socid).decode('utf-8'))
+            self.info("SOCID       : " + hexlify(socid).decode('utf-8'))
             retval["socid"] = hexlify(socid).decode('utf-8')
-        else:
-            try:
-                if self.config.chipconfig.socid_addr is not None:
-                    socid = b"".join([pack("<I", val) for val in self.readmem(self.config.chipconfig.socid_addr, 8)])
-                    self.config.set_socid(socid)
-                    self.info("SOCID        : " + hexlify(socid).decode('utf-8'))
-                    retval["socid"] = hexlify(socid).decode('utf-8')
-            except Exception as err:
-                pass
+            self.config.hwparam.writesetting("socid", hexlify(socid).decode('utf-8'))
+        if hwcode is not None:
+            self.info("HWCODE      : " + hex(hwcode))
+            retval["hwcode"] = hex(hwcode)
+            self.config.hwparam.writesetting("hwcode", hex(hwcode))
 
         if self.config.chipconfig.dxcc_base is not None:
-            # hwc.aes_hwcrypt(btype="gcpu", mode="mtee")
             self.info("Generating dxcc rpmbkey...")
             rpmbkey = hwc.aes_hwcrypt(btype="dxcc", mode="rpmb")
             self.info("Generating dxcc fdekey...")
@@ -594,11 +606,13 @@ class xflashext(metaclass=LogBase):
             """
             return retval
         elif self.config.chipconfig.sej_base is not None:
+            if os.path.exists("tee.json"):
+                val=json.loads(open("tee.json","r").read())
+                self.decrypt_tee(val["filename"],bytes.fromhex(val["data"]),bytes.fromhex(val["data2"]))
             if meid == b"":
-                if self.config.chipconfig.meid_addr:
-                    meid = self.custom_read(self.config.chipconfig.meid_addr, 16)
+                meid = self.custom_read(0x1008ec, 16)
             if meid != b"":
-                self.config.set_meid(meid)
+                #self.config.set_meid(meid)
                 self.info("Generating sej rpmbkey...")
                 self.setotp(hwc)
                 rpmbkey = hwc.aes_hwcrypt(mode="rpmb", data=meid, btype="sej")
@@ -614,4 +628,12 @@ class xflashext(metaclass=LogBase):
                     retval["mtee"] = hexlify(mtee).decode('utf-8')
             else:
                 self.info("SEJ Mode: No meid found. Are you in brom mode ?")
+        if self.config.chipconfig.gcpu_base is not None:
+            if self.config.hwcode in [0x335,0x8167]:
+                self.info("Generating gcpu mtee2 key...")
+                mtee2 = hwc.aes_hwcrypt(btype="gcpu", mode="mtee")
+                if mtee2 is not None:
+                    self.info("MTEE2       : " + hexlify(mtee2).decode('utf-8'))
+                    self.config.hwparam.writesetting("mtee2", hexlify(mtee2).decode('utf-8'))
+                    retval["mtee2"] = hexlify(mtee2).decode('utf-8')
         return retval

@@ -19,7 +19,7 @@ release the buttons.
 ## Installation
 
 ### Use Re LiveDVD (everything ready to go, based on Ubuntu):
-[Download Re Live DVD V3](https://drive.google.com/file/d/1OoGWFSZTqWqwfU35W6UAUwc20CJrK95t/view?usp=sharing)
+[Download Re Live DVD V3](https://androidfilehost.com/?fid=2981970449027578109)
 User: user, Password:user (based on Ubuntu 22.04 LTS)
 
 
@@ -49,7 +49,9 @@ sudo usermod -a -G dialout $USER
 sudo cp Setup/Linux/*.rules /etc/udev/rules.d
 sudo udevadm control -R
 ```
-Make sure to reboot after adding the user to dialout/plugdev.
+Make sure to reboot after adding the user to dialout/plugdev. If the device
+has a vendor interface 0xFF (like LG), make sure to add "blacklist qcaux" to
+the "/etc/modprobe.d/blacklist.conf".
 
 ---------------------------------------------------------------------------------------------------------------
 

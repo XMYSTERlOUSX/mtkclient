@@ -20,7 +20,7 @@ def split_by_n(seq, unit_count):
         seq = seq[unit_count:]
 
 class Mtk(metaclass=LogBase):
-    def __init__(self, config, loglevel=logging.INFO, preinit=True):
+    def __init__(self, config, loglevel=logging.INFO, serialportname:str=None, preinit=True):
         self.config = config
         self.loader = config.loader
         self.vid = config.vid
@@ -30,7 +30,7 @@ class Mtk(metaclass=LogBase):
         self.__logger = logsetup(self, self.__logger, loglevel, config.gui)
         self.eh = ErrorHandler()
         if preinit:
-            self.init()
+            self.setup(self.vid,self.pid,self.interface,serialportname)
 
     def patch_preloader_security(self, data):
         patched = False
@@ -39,8 +39,8 @@ class Mtk(metaclass=LogBase):
             ("A3687BB12846", "0123A3602846"),  # oppo security
             ("B3F5807F01D1", "B3F5807F01D14FF000004FF000007047"),  # confirmed : mt6739 c30, mt6833
             ("B3F5807F04BF4FF4807305F011B84FF0FF307047", "B3F5807F04BF4FF480734FF000004FF000007047"),
+            ("10B50C680268","10B5012010BD") # Ram blacklist
         ]
-
         i = 0
         for patchval in patches:
             pattern = bytes.fromhex(patchval[0])
@@ -52,9 +52,10 @@ class Mtk(metaclass=LogBase):
                 # break
             i += 1
         if patched:
-            # with open(sys.argv[1]+".patched","wb") as wf:
-            #    wf.write(data)
-            #    print("Patched !")
+            import sys
+            with open("preloader.patched","wb") as wf:
+                wf.write(data)
+                print("Patched !")
             self.info(f"Patched preloader security: {hex(i)}")
         else:
             self.warning(f"Failed to patch preloader security")
@@ -85,7 +86,7 @@ class Mtk(metaclass=LogBase):
             dadata = data
         return daaddr, dadata
 
-    def init(self, vid=None, pid=None, interface=None):
+    def setup(self, vid=None, pid=None, interface=None, serialportname:str = None):
         if vid is None:
             vid = self.vid
         if pid is None:
@@ -101,7 +102,7 @@ class Mtk(metaclass=LogBase):
             portconfig = [[vid, pid, interface]]
         else:
             portconfig = default_ids
-        self.port = Port(self, portconfig, self.__logger.level)
+        self.port = Port(mtk=self, portconfig=portconfig, serialportname=serialportname, loglevel=self.__logger.level)
         self.preloader = Preloader(self, self.__logger.level)
         self.daloader = DAloader(self, self.__logger.level)
 
@@ -116,17 +117,19 @@ class Mtk(metaclass=LogBase):
                         plt.crash(crashmode)
                     except:
                         pass
-                    rmtk = Mtk(config=self.config, loglevel=self.__logger.level)
+                    rmtk = Mtk(config=self.config, loglevel=self.__logger.level,
+                               serialportname=rmtk.port.serialportname)
                     rmtk.preloader.display = display
                     if rmtk.preloader.init(maxtries=20):
-                        break
+                        if rmtk.config.is_brom:
+                            break
             else:
                 try:
                     plt.crash(mode)
                 except Exception as err:
                     self.__logger.debug(str(err))
                     pass
-                rmtk = Mtk(config=self.config, loglevel=self.__logger.level)
+                rmtk = Mtk(config=self.config, loglevel=self.__logger.level, serialportname=rmtk.port.serialportname)
                 rmtk.preloader.display = display
                 if rmtk.preloader.init(maxtries=20):
                     return rmtk

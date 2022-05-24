@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# MTK Flash Client (c) B.Kerler 2018-2021.
+# MTK Flash Client (c) B.Kerler 2018-2022.
 # Licensed under GPLv3 License
 import argparse
 from mtkclient.Library.mtk_main import Main, metamodes
 
-info = "MTK Flash/Exploit Client V1.54 (c) B.Kerler 2018-2021"
+info = "MTK Flash/Exploit Client V1.56 (c) B.Kerler 2018-2022"
 
 cmds = {
     "printgpt": "Print GPT Table information",
@@ -90,6 +90,7 @@ if __name__ == '__main__':
     da_cmds = parser_da.add_subparsers(dest='subcmd', help='Commands: peek poke keys unlock')
     da_peek = da_cmds.add_parser("peek", help="Read memory")
     da_peek.add_argument('--preloader', help='Set the preloader filename for dram config')
+    da_dump = da_cmds.add_parser("memdump", help="Dump whole memory areas")
     da_poke = da_cmds.add_parser("poke", help="Write memory")
     da_poke.add_argument('--preloader', help='Set the preloader filename for dram config')
     da_keys = da_cmds.add_parser("generatekeys", help="Generate keys")
@@ -106,15 +107,21 @@ if __name__ == '__main__':
     da_rpmb_cmds = da_rpmb.add_subparsers(dest='rpmb_subcmd', help='Commands: r w')
     da_rpmb_r = da_rpmb_cmds.add_parser("r", help="Read rpmb")
     da_rpmb_r.add_argument('--filename', type=str, help="Filename to write data into")
+    da_rpmb_r.add_argument('--preloader', help='Set the preloader filename for dram config')
 
     da_rpmb_w = da_rpmb_cmds.add_parser("w", help="Write rpmb")
     da_rpmb_w.add_argument('filename', type=str, help="Filename to write from")
+    da_rpmb_w.add_argument('--preloader', help='Set the preloader filename for dram config')
 
     da_rpmb_e = da_rpmb_cmds.add_parser("e", help="Erase rpmb")
+    da_rpmb_e.add_argument('--preloader', help='Set the preloader filename for dram config')
 
     da_peek.add_argument('address', type=str, help="Address to read from (hex value)")
     da_peek.add_argument('length', type=str, help="Length to read")
     da_peek.add_argument('--filename', type=str, help="Filename to write data into")
+
+    da_dump.add_argument('directory', type=str, help="Directory to dump ram dump files")
+    da_dump.add_argument('--preloader', help='Set the preloader filename for dram config')
 
     da_poke.add_argument('address', type=str, help="Address to read from (hex value)")
     da_poke.add_argument('data', type=str, help="Data to write")
@@ -658,6 +665,9 @@ if __name__ == '__main__':
     parser_plstage.add_argument('--pid', type=str, help='Set usb product id used for MTK Preloader')
     parser_plstage.add_argument('--debugmode', action='store_true', default=False, help='Enable verbose mode')
     parser_plstage.add_argument('--skipwdt', help='Skip wdt init')
+    parser_plstage.add_argument('--offset', help='Peek ram offset using patched preloader')
+    parser_plstage.add_argument('--length', help='Peek ram length using patched preloader')
+    parser_plstage.add_argument('--filename', help='Filename for peek ram using patched preloader')
     parser_plstage.add_argument('--wdt', help='Set a specific watchdog addr')
     parser_plstage.add_argument('--mode', help='Set a crash mode (0=dasend1,1=dasend2,2=daread)')
     parser_plstage.add_argument('--var1', help='Set kamakiri specific var1 value')
@@ -685,6 +695,19 @@ if __name__ == '__main__':
     parser_rl.add_argument('--generatekeys', action="store_true", help='Option for deriving hw keys')
     parser_gpt.add_argument('--generatekeys', action="store_true", help='Option for deriving hw keys')
     parser_r.add_argument('--generatekeys', action="store_true", help='Option for deriving hw keys')
+
+    parser_printgpt.add_argument('--serialport', help='Use serial port')
+    parser_footer.add_argument('--serialport', help='Use serial port')
+    parser_e.add_argument('--serialport', help='Use serial port')
+    parser_es.add_argument('--serialport', help='Use serial port')
+    parser_wl.add_argument('--serialport', help='Use serial port')
+    parser_wf.add_argument('--serialport', help='Use serial port')
+    parser_w.add_argument('--serialport', help='Use serial port')
+    parser_rs.add_argument('--serialport', help='Use serial port')
+    parser_rf.add_argument('--serialport', help='Use serial port')
+    parser_rl.add_argument('--serialport', help='Use serial port')
+    parser_gpt.add_argument('--serialport', help='Use serial port')
+    parser_r.add_argument('--serialport', help='Use serial port')
 
     args = parser.parse_args()
     cmd = args.cmd

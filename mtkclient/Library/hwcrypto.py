@@ -45,19 +45,10 @@ class hwcrypto(metaclass=LogBase):
         self.socid_addr = setup.socid_addr
         self.prov_addr = setup.prov_addr
 
-    def mtee(self, filename, offset):
-        with open(filename, "rb") as rf:
-            rf.seek(offset + 8)
-            pos = unpack("<I", rf.read(4))[0]
-            rf.seek(offset + 0x14)
-            length = unpack("<I", rf.read(4))[0]
-            rf.seek(offset + 0x1C)
-            seed = rf.read(0x20)
-            rf.seek(offset + pos)
-            data = rf.read(length)
-            self.gcpu.init()
-            self.gcpu.acquire()
-            return self.gcpu.mtk_gcpu_decrypt_mtee_img(data, seed)
+    def mtee(self, data, keyseed, ivseed, aeskey1, aeskey2):
+        self.gcpu.init()
+        self.gcpu.acquire()
+        return self.gcpu.mtk_gcpu_decrypt_mtee_img(data, keyseed, ivseed, aeskey1, aeskey2)
 
     def aes_hwcrypt(self, data=b"", iv=None, encrypt=True, otp=None, mode="cbc", btype="sej"):
         if otp is None:
@@ -83,6 +74,11 @@ class hwcrypto(metaclass=LogBase):
             elif mode == "cbc":
                 if self.gcpu.aes_setup_cbc(addr=addr, data=data, iv=iv, encrypt=encrypt):
                     return self.gcpu.aes_read_cbc(addr=addr, encrypt=encrypt)
+            elif mode == "mtee":
+                if self.hwcode == 0x321:
+                    return self.gcpu.mtk_gcpu_mtee_6735()
+                elif self.hwcode == 0x8167:
+                    return self.gcpu.mtk_gcpu_mtee_8167()
         elif btype == "dxcc":
             if mode == "fde":
                 return self.dxcc.generate_rpmb(1)
